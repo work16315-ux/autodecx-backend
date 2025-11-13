@@ -65,7 +65,9 @@ CORS(app, resources={
             "https://autodecx-test.vercel.app"  # Your specific domain (update this after deployment)
         ],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type", "Authorization", "Accept"],
+        "supports_credentials": True,
+        "expose_headers": ["Content-Range", "X-Content-Range"]
     }
 })
 
@@ -624,3 +626,4 @@ if __name__ == '__main__':
         port=port,
         debug=False
     )
+
