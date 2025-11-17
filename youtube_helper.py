@@ -16,10 +16,10 @@ class YouTubeAudioDownloader:
     Download audio from YouTube videos for vehicle sound comparison
     """
     
-    def __init__(self, max_videos=3, max_duration=180):
+    def __init__(self, max_videos=15, max_duration=180):
         """
         Args:
-            max_videos: Maximum number of videos to download
+            max_videos: Maximum number of videos to download (increased to 15)
             max_duration: Maximum video duration in seconds (default: 3 minutes)
         """
         self.max_videos = max_videos
@@ -34,7 +34,9 @@ class YouTubeAudioDownloader:
                 'preferredquality': '192',
             }],
             'outtmpl': str(TEMP_DIR / '%(id)s.%(ext)s'),
+            'cookiefile': '/app/youtube_cookies.txt',
             'quiet': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
             'no_warnings': True,
             'extract_flat': False,
             'socket_timeout': 30,
@@ -57,6 +59,7 @@ class YouTubeAudioDownloader:
             # Use yt-dlp to search YouTube
             ydl_search_opts = {
                 'quiet': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
                 'no_warnings': True,
                 'extract_flat': True,
                 'force_generic_extractor': False,
@@ -143,17 +146,131 @@ class YouTubeAudioDownloader:
             logger.error(f"Download error for {video_url}: {str(e)}")
             return None
     
+
+    def download_audio_with_metadata(self, video_url, video_id):
+        """
+        Download audio AND extract comprehensive metadata from YouTube video
+        
+        Args:
+            video_url: YouTube video URL
+            video_id: Unique video identifier
+            
+        Returns:
+            Tuple: (audio_file_path, metadata_dict) or (None, None)
+        """
+        try:
+            logger.info(f"Downloading audio and metadata from: {video_url}")
+            
+            # Extract info without downloading first to get metadata
+            # Enable comment extraction explicitly
+            metadata_opts = {
+                'quiet': True, 
+                'cookiefile': '/app/youtube_cookies.txt',
+                'getcomments': True,  # CRITICAL: Enable comment extraction
+                'extractor_args': {'youtube': {'comment_sort': ['top'], 'max_comments': ['15,all,15,0']}},
+            }
+            with yt_dlp.YoutubeDL(metadata_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                
+                # Extract metadata
+                metadata = {
+                    'title': info.get('title', 'Unknown'),
+                    'description': info.get('description', ''),
+                    'channel': info.get('uploader', info.get('channel', 'Unknown')),
+                    'duration': info.get('duration', 0),
+                    'view_count': info.get('view_count', 0),
+                    'like_count': info.get('like_count', 0),
+                    'tags': info.get('tags', []),
+                    'categories': info.get('categories', []),
+                    'subtitles': [],
+                    'comments': []
+                }
+                
+                # Extract automatic captions (subtitles)
+                if 'automatic_captions' in info and info['automatic_captions']:
+                    # Try to get English captions
+                    if 'en' in info['automatic_captions']:
+                        caption_url = None
+                        for caption in info['automatic_captions']['en']:
+                            if caption.get('ext') == 'json3':
+                                caption_url = caption.get('url')
+                                break
+                        
+                        if caption_url:
+                            try:
+                                import requests
+                                import json
+                                response = requests.get(caption_url, timeout=10)
+                                if response.ok:
+                                    caption_data = response.json()
+                                    # Extract text from caption events
+                                    caption_text = []
+                                    if 'events' in caption_data:
+                                        for event in caption_data['events']:
+                                            if 'segs' in event:
+                                                for seg in event['segs']:
+                                                    if 'utf8' in seg:
+                                                        caption_text.append(seg['utf8'])
+                                    metadata['subtitles'] = caption_text
+                                    logger.info(f"✅ Extracted {len(caption_text)} caption segments")
+                            except Exception as e:
+                                logger.warning(f"Could not extract captions: {e}")
+                
+                # Extract top comments (if available) - FIRST 15 COMMENTS
+                if 'comments' in info and info['comments']:
+                    top_comments = []
+                    for comment in info['comments'][:15]:  # Top 15 comments as requested
+                        comment_text = comment.get('text', '')
+                        author = comment.get('author', 'Unknown')
+                        likes = comment.get('like_count', 0)
+                        if comment_text:
+                            top_comments.append({
+                                'author': author,
+                                'text': comment_text,
+                                'likes': likes
+                            })
+                    metadata['comments'] = top_comments
+                    logger.info(f"✅ Extracted {len(top_comments)} comments")
+                else:
+                    logger.warning("⚠️  No comments available for this video")
+            
+            # Now download audio with original options
+            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                ydl.download([video_url])
+                
+                # Find the downloaded file
+                audio_file = TEMP_DIR / f"{video_id}.wav"
+                
+                if audio_file.exists():
+                    logger.info(f"✅ Downloaded audio: {audio_file}")
+                    return audio_file, metadata
+                else:
+                    # Check alternative extensions
+                    for ext in ['.wav', '.m4a', '.webm', '.opus']:
+                        alt_file = TEMP_DIR / f"{video_id}{ext}"
+                        if alt_file.exists():
+                            logger.info(f"✅ Downloaded audio: {alt_file}")
+                            return alt_file, metadata
+                    
+                    logger.error(f"Audio file not found after download: {video_id}")
+                    return None, None
+        
+        except Exception as e:
+            logger.error(f"Download error for {video_url}: {str(e)}")
+            return None, None
+
+
     def download_multiple(self, videos):
         """
-        Download audio from multiple videos in parallel
+        Download audio from multiple videos in parallel WITH metadata
         
         Args:
             videos: List of video info dicts
             
         Returns:
-            List of tuples: (video_info, audio_file_path)
+            List of tuples: (video_info, audio_file_path, metadata_dict)
         """
-        logger.info(f"Starting parallel download of {len(videos)} videos")
+        logger.info(f"Starting parallel download of {len(videos)} videos with metadata")
         
         results = []
         start_time = time.time()
@@ -161,22 +278,23 @@ class YouTubeAudioDownloader:
         # Use ThreadPoolExecutor for parallel downloads
         with ThreadPoolExecutor(max_workers=3) as executor:
             future_to_video = {
-                executor.submit(self.download_audio, video['url'], video['id']): video
+                executor.submit(self.download_audio_with_metadata, video['url'], video['id']): video
                 for video in videos
             }
             
             for future in as_completed(future_to_video):
                 video = future_to_video[future]
                 try:
-                    audio_path = future.result()
-                    if audio_path:
-                        results.append((video, audio_path))
-                        logger.info(f"✅ Downloaded {len(results)}/{len(videos)}")
+                    result = future.result()
+                    if result and result[0]:  # If audio_path exists
+                        audio_path, metadata = result
+                        results.append((video, audio_path, metadata))
+                        logger.info(f"✅ Downloaded {len(results)}/{len(videos)} (with metadata)")
                 except Exception as e:
                     logger.error(f"Failed to download {video['title']}: {str(e)}")
         
         elapsed = time.time() - start_time
-        logger.info(f"Downloaded {len(results)} videos in {elapsed:.2f}s")
+        logger.info(f"Downloaded {len(results)} videos with metadata in {elapsed:.2f}s")
         
         return results
     
@@ -190,7 +308,7 @@ class YouTubeAudioDownloader:
             logger.error(f"Cleanup error: {str(e)}")
 
 
-def search_vehicle_issue_videos(manufacturer, year, model, location, max_videos=3):
+def search_vehicle_issue_videos(manufacturer, year, model, location, max_videos=15, audio_description=None, occurrence=None):
     """
     Search for YouTube videos matching vehicle issue
     
@@ -204,10 +322,23 @@ def search_vehicle_issue_videos(manufacturer, year, model, location, max_videos=
     Returns:
         List of tuples: (video_info, audio_file_path)
     """
-    # Build search query
-    query = f"{manufacturer} {year} {model} {location} noise problem sound"
+    # Build highly specific search query with all context
+    query_parts = [manufacturer, str(year), model]
     
-    logger.info(f"🔍 Searching for: {query}")
+    if location and location != 'unknown':
+        query_parts.append(location)
+    
+    if occurrence:
+        query_parts.append(occurrence)
+    
+    if audio_description:
+        query_parts.append(audio_description)
+    
+    query_parts.extend(["noise", "problem", "sound", "diagnosis"])
+    
+    query = " ".join(filter(None, query_parts))
+    
+    logger.info(f"🔍 Enhanced search query: {query}")
     
     downloader = YouTubeAudioDownloader(max_videos=max_videos)
     
@@ -260,3 +391,8 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("✅ Test complete!")
     print("="*60)
+
+
+
+
+

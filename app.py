@@ -65,9 +65,7 @@ CORS(app, resources={
             "https://autodecx-test.vercel.app"  # Your specific domain (update this after deployment)
         ],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "Accept"],
-        "supports_credentials": True,
-        "expose_headers": ["Content-Range", "X-Content-Range"]
+        "allow_headers": ["Content-Type"]
     }
 })
 
@@ -203,42 +201,41 @@ def upload_audio():
         print("🔬 Analyzing audio with librosa...")
         
         analysis_start = datetime.now()
-        y, sr = librosa.load(str(converted_path), sr=22050, mono=True, duration=10.0)
-        duration = len(y) / sr
-
+        y, sr = librosa.load(str(converted_path), sr=None)
+        duration = librosa.get_duration(y=y, sr=sr)
+        
         logger.info(f"[{request_id}] Audio loaded: duration={duration:.2f}s, sr={sr}Hz, samples={len(y)}")
-
-        # Basic features only - minimal memory usage
-        rms = float(np.sqrt(np.mean(y**2)))  # Simplified RMS
-        zcr = float(np.mean(np.abs(np.diff(np.sign(y)))) / 2)  # Simplified ZCR
-
+        
+        rms = float(np.mean(librosa.feature.rms(y=y)))
+        zcr = float(np.mean(librosa.feature.zero_crossing_rate(y)))
+        
         logger.info(f"[{request_id}] Basic features extracted: RMS={rms:.4f}, ZCR={zcr:.4f}")
-
-        # Simplified frequency analysis using FFT instead of librosa spectral features
-        fft = np.fft.rfft(y)
-        magnitude = np.abs(fft)
-        freqs = np.fft.rfftfreq(len(y), 1/sr)
-
-        # Find dominant frequency
-        dominant_idx = np.argmax(magnitude)
-        spectral_centroid = float(freqs[dominant_idx])
-
-        # Simplified spectral rolloff
-        cumsum_mag = np.cumsum(magnitude)
-        rolloff_idx = np.where(cumsum_mag >= 0.85 * cumsum_mag[-1])[0]
-        spectral_rolloff = float(freqs[rolloff_idx[0]]) if len(rolloff_idx) > 0 else 0.0
-
-        # Simplified bandwidth
-        spectral_bandwidth = abs(spectral_rolloff - spectral_centroid)
-
+        
+        try:
+            tempo_result, _ = librosa.beat.beat_track(y=y, sr=sr)
+            if isinstance(tempo_result, np.ndarray):
+                tempo = float(tempo_result.item()) if tempo_result.size > 0 else 0.0
+            else:
+                tempo = float(tempo_result) if tempo_result else 0.0
+            logger.info(f"[{request_id}] Tempo detected: {tempo:.1f} BPM")
+        except Exception as e:
+            logger.warning(f"[{request_id}] Tempo detection failed: {e}")
+            print(f"⚠️ Tempo detection failed: {e}")
+            tempo = 0.0
+        
+        spectral_centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)))
+        spectral_rolloff = float(np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr)))
+        spectral_bandwidth = float(np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr)))
+        
         logger.info(f"[{request_id}] Spectral features: centroid={spectral_centroid:.1f}Hz, rolloff={spectral_rolloff:.1f}Hz, bandwidth={spectral_bandwidth:.1f}Hz")
-
+        
         analysis_time = (datetime.now() - analysis_start).total_seconds()
         logger.info(f"[{request_id}] Analysis complete in {analysis_time:.2f}s")
-
+        
         print(f"⏱️  Duration: {duration:.2f}s")
-        print(f"🔊 RMS: {rms:.4f}")
+        print(f"🎯 RMS: {rms:.4f}")
         print(f"〰️  ZCR: {zcr:.4f}")
+        print(f"🎵 Tempo: {tempo:.1f} BPM")
         print(f"📊 Spectral Centroid: {spectral_centroid:.1f} Hz")
         print(f"📈 Spectral Rolloff: {spectral_rolloff:.1f} Hz")
         print(f"📏 Spectral Bandwidth: {spectral_bandwidth:.1f} Hz")
@@ -626,4 +623,3 @@ if __name__ == '__main__':
         port=port,
         debug=False
     )
-
